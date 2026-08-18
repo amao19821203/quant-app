@@ -387,11 +387,12 @@
   <div class="broker-bar">
     <div style="font-weight:600;margin-bottom:8px">📒 我的实盘（手动记账）</div>
     <div class="controls" style="flex-wrap:wrap;gap:8px">
-      <input type="text" id="real-code" placeholder="6位代码" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:13px;width:120px">
+      <input type="text" id="real-code" placeholder="代码或名称" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:13px;width:140px">
       <input type="number" id="real-price" placeholder="买入价" step="0.01" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:13px;width:100px">
       <input type="date" id="real-date" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:13px;width:155px">
       <input type="number" id="real-qty" placeholder="股数" step="100" value="100" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:13px;width:90px">
       <button id="real-add" style="background:var(--accent);color:#fff;border:none;border-radius:8px;padding:7px 16px;font-size:13px;cursor:pointer">添加</button>
+      <button id="real-cancel" style="display:none;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer">取消</button>
       <span class="sub" id="real-status"></span>
     </div>
     <div class="real-feecfg" style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-top:10px;padding:10px 12px;background:var(--panel2);border:1px solid var(--border);border-radius:10px">
@@ -646,7 +647,7 @@
 
   // ===== 我的实盘：手动记账 + 实时盈亏（含手续费美化） =====
   const REAL_KEY='quant_real_holdings_v1';
-  function realLoad(){try{return JSON.parse(localStorage.getItem(REAL_KEY)||'[]');}catch(e){return [];}}
+  function realLoad(){try{let a=JSON.parse(localStorage.getItem(REAL_KEY)||'[]');if(!Array.isArray(a))return [];let ch=false;a=a.map((x,i)=>{if(!x.id){x.id=(Date.now()+i)+'_'+Math.random().toString(36).slice(2,6);ch=true;}return x;});if(ch)realSave(a);return a;}catch(e){return [];}}
   function realSave(a){try{localStorage.setItem(REAL_KEY,JSON.stringify(a));}catch(e){}}
   // 手续费设置（A股常见默认值，可改）
   const FEE_KEY='quant_real_fees_v1';
@@ -669,6 +670,18 @@
     const tot=buyAmt+buyComm+buyTrf+sellComm+sellTrf+sellStamp;
     return {costPrice:tot/Math.max(1,qty),costTotal:tot,buyFee:buyComm+buyTrf,sellFee:sellComm+sellTrf+sellStamp};
   }
+  let editingId=null;
+  // 代码/名称 → {code,name} 解析（优先用已选股名单，命中即得名，无需联网）
+  function resolveCodeName(raw){
+    raw=(raw||'').trim(); if(!raw)return null;
+    if(typeof D!=='undefined'&&D&&D.stocks){
+      if(/^\d{6}$/.test(raw)){const s=D.stocks.find(x=>x.code===raw);return {code:raw,name:s?s.name:raw};}
+      const s=D.stocks.find(x=>x.name===raw||(x.name&&(x.name.includes(raw)||raw.includes(x.name))));
+      if(s)return {code:s.code,name:s.name};
+      const m=raw.match(/\d{6}/); if(m){const s2=D.stocks.find(x=>x.code===m[0]);return {code:m[0],name:s2?s2.name:m[0]};}
+    } else if(/^\d{6}$/.test(raw)){return {code:raw,name:raw};}
+    return null;
+  }
   async function renderReal(){
     const box=$('#real-pos'); if(!box)return;
     const sumEl=$('#real-summary');
@@ -680,7 +693,7 @@
     if(dis)dis.innerHTML='成本口径：<b>'+costLabel+'</b>。'+(fee.enabled?(fee.mode==='breakeven'?'保本价已预估卖出佣金＋过户费＋印花税（按现价估算），即现价卖出后的真实净盈亏。':'成本价已含买入佣金＋过户费，即持仓市值减该成本后的账面盈亏。'):'未含手续费，按原始买入价计算。')+' 现价来自东方财富实时行情（盘后/休市时为最近收盘价），数据仅存本机。';
     const arr=realLoad();
     if(!arr.length){
-      box.innerHTML='<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px">还没有记录。在上方填入代码、买入价、买入日期、股数，点「添加」即可生成实时盈亏。</td></tr>';
+      box.innerHTML='<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:18px">还没有记录。在上方填入代码（或名称）、买入价、买入日期、股数，点「添加」即可。同一只股票可多次添加（分批建仓），每条记录都能单独编辑 / 删除。</td></tr>';
       if(sumEl)sumEl.innerHTML='';
       return;
     }
@@ -689,6 +702,8 @@
       const it=arr[i];
       const secid=wlSecid(it.code);
       let price=null,pct=null,name=it.name||it.code;
+      const ds=(D&&D.stocks)?D.stocks.find(x=>x.code===it.code):null;
+      if(ds&&ds.name&&(!it.name||it.name===it.code))name=ds.name;
       if(secid){try{const q=await wlQuote(secid);if(q&&q.f43){price=q.f43/100;pct=q.f169/100;if(q.f58)name=q.f58;}}catch(e){}}
       const qty=it.qty||0;
       const ci=realCostInfo(it,price,fee);
@@ -701,11 +716,16 @@
       arr[i]._name=name; arr[i]._price=price; arr[i]._pct=pct; arr[i]._pl=pl; arr[i]._plp=plp; arr[i]._days=days;
       arr[i]._costPrice=ci.costPrice; arr[i]._buyFee=ci.buyFee||0;
     }
+    // 把补全到的名称写回存储（解决「只显示代码」的历史记录）
+    let _needSave=false;
+    arr.forEach(it=>{ if(it.name!==it._name){it.name=it._name;_needSave=true;} });
+    if(_needSave)realSave(arr);
     box.innerHTML=arr.map((it,i)=>{
       const plc=colorFor(it._pl), pc=colorFor(it._pct||0);
       const fmtP=(v)=> (v>0?'+':'')+v.toFixed(2)+'%';
       const feeNote=it._buyFee>0?`<div class="code" style="opacity:.7">买入费 ${it._buyFee.toFixed(0)}</div>`:'';
-      return `<tr>
+      const _isEdit=it.id===editingId;
+      return `<tr${_isEdit?' style="background:var(--panel2)"':''}>
         <td style="text-align:left"><div class="name">${it._name}</div><div class="code">${it.code}</div></td>
         <td><div>${it._costPrice.toFixed(3)}</div><div class="code" style="opacity:.7">买入 ${it.buyPrice.toFixed(2)}</div>${feeNote}</td>
         <td>${it.buyDate||'-'}</td>
@@ -715,9 +735,13 @@
         <td class="${plc}">${(it._pl>=0?'+':'-')+Math.abs(it._pl).toFixed(0)}</td>
         <td class="${plc}">${fmtP(it._plp)}</td>
         <td>${it._days}</td>
-        <td style="color:var(--muted);cursor:pointer;font-size:16px" data-del="${i}" title="删除">✕</td>
+        <td style="white-space:nowrap">
+          <span style="color:var(--accent);cursor:pointer;font-size:13px;margin-right:10px" data-edit="${i}" title="编辑">编辑</span>
+          <span style="color:var(--muted);cursor:pointer;font-size:13px" data-del="${i}" title="删除">删除</span>
+        </td>
       </tr>`;
     }).join('');
+    box.querySelectorAll('[data-edit]').forEach(el=>el.onclick=()=>realEdit(parseInt(el.dataset.edit)));
     box.querySelectorAll('[data-del]').forEach(el=>el.onclick=()=>realDel(parseInt(el.dataset.del)));
     const tpl=totMkt-totCost, tplp=totCost>0?(tpl/totCost*100):0, tpc=colorFor(tpl);
     if(sumEl){
@@ -728,25 +752,52 @@
         `<div class="card"><div class="card-k">总收益率</div><div class="card-v ${tpc}">${(tplp>0?'+':'-')+Math.abs(tplp).toFixed(2)}%</div></div>`;
     }
   }
-  function realDel(i){const a=realLoad();a.splice(i,1);realSave(a);renderReal();}
+  function realDel(i){const a=realLoad();const it=a[i];a.splice(i,1);realSave(a);if(editingId&&it&&it.id===editingId)realCancelEdit();renderReal();}
+  function realEdit(i){
+    const a=realLoad(); const it=a[i]; if(!it)return;
+    editingId=it.id;
+    $('#real-code').value=(it.name&&it.name!==it.code)?it.name:it.code;
+    $('#real-price').value=it.buyPrice;
+    $('#real-date').value=it.buyDate||'';
+    $('#real-qty').value=it.qty||0;
+    $('#real-add').textContent='保存修改';
+    const cbtn=$('#real-cancel'); if(cbtn)cbtn.style.display='';
+    $('#real-status').textContent='正在修改这条记录，改完点「保存修改」';
+    $('#real-code').focus();
+  }
+  function realCancelEdit(){
+    editingId=null;
+    $('#real-code').value='';$('#real-price').value='';$('#real-date').value='';$('#real-qty').value=100;
+    const ab=$('#real-add'); if(ab)ab.textContent='添加';
+    const cbtn=$('#real-cancel'); if(cbtn)cbtn.style.display='none';
+    $('#real-status').textContent='';
+  }
   const realAddBtn=$('#real-add');
+  const realCancelBtn=$('#real-cancel');
+  if(realCancelBtn)realCancelBtn.onclick=realCancelEdit;
   if(realAddBtn)realAddBtn.onclick=async()=>{
-    const code=$('#real-code').value.trim();
+    const raw=$('#real-code').value.trim();
     const price=parseFloat($('#real-price').value);
     const date=$('#real-date').value;
     const qty=parseInt($('#real-qty').value)||0;
     const status=$('#real-status');
-    if(!/^\d{6}$/.test(code)){status.textContent='请输入6位数字代码';return;}
+    const resolved=resolveCodeName(raw);
+    if(!resolved){status.textContent='请输入6位代码或股票名称';return;}
     if(isNaN(price)||price<=0){status.textContent='买入价无效';return;}
     if(!date){status.textContent='请选择买入日期';return;}
     if(qty<=0){status.textContent='股数需大于0';return;}
-    let name=code; const secid=wlSecid(code);
+    let name=resolved.name; const secid=wlSecid(resolved.code);
     if(secid){try{const q=await wlQuote(secid);if(q&&q.f58)name=q.f58;}catch(e){}}
     const a=realLoad();
-    if(a.find(x=>x.code===code)){status.textContent='该代码已存在，可删除后重加';return;}
-    a.unshift({code,name,buyPrice:price,buyDate:date,qty});
+    if(editingId){
+      const idx=a.findIndex(x=>x.id===editingId);
+      if(idx>=0)a[idx]={id:editingId,code:resolved.code,name,buyPrice:price,buyDate:date,qty};
+      realSave(a); realCancelEdit(); status.textContent='已保存 ✓'; renderReal(); return;
+    }
+    // 允许同一只股票多次建仓：不再拦截重复代码
+    a.unshift({id:(Date.now())+'_'+Math.random().toString(36).slice(2,6),code:resolved.code,name,buyPrice:price,buyDate:date,qty});
     realSave(a);
-    $('#real-code').value='';$('#real-price').value='';$('#real-date').value='';
+    $('#real-code').value='';$('#real-price').value='';$('#real-date').value='';$('#real-qty').value=100;
     status.textContent='已添加 ✓';
     renderReal();
   };
